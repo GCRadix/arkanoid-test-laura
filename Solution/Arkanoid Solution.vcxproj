@@ -172,6 +172,7 @@
     <ClCompile Include="AudioManager.cpp" />
     <ClCompile Include="BiquadFilter.cpp" />
     <ClCompile Include="Game.cpp" />
+    <ClCompile Include="LoopVoice.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Player.cpp" />
     <ClCompile Include="Projectile.cpp" />
@@ -185,8 +186,10 @@
     <ClInclude Include="AudioManager.h" />
     <ClInclude Include="BiquadFilter.h" />
     <ClInclude Include="Game.h" />
+    <ClInclude Include="LoopVoice.h" />
     <ClInclude Include="Player.h" />
     <ClInclude Include="PlayingVoice.h" />
+    <ClInclude Include="LoopVoice.h" />
     <ClInclude Include="Projectile.h" />
     <ClInclude Include="RenderedObject.h" />
     <ClInclude Include="Global.h" />

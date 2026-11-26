@@ -80,6 +80,9 @@
     <ClInclude Include="PlayingVoice.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="LoopVoice.h">
+          <Filter>Header Files</Filter>
+        </ClInclude>
     <ClInclude Include="Global.h">
       <Filter>Header Files</Filter>
     </ClInclude>

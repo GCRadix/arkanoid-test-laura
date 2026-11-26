@@ -4,6 +4,8 @@
 #include <portaudio.h>
 #include <vector>
 
+#include "LoopVoice.h"
+
 namespace Arkanoid::Audio
 {
 class CBiquadFilter;
@@ -31,7 +33,6 @@ public:
 	bool           UpdatePosition(SPlayingVoice* pVoice, Vec2D const& pos);
 	void           SetMusic(EMusic const music);
 
-
 private:
 
 	std::vector<std::shared_ptr<Arkanoid::Audio::SPlayingVoice>> m_pPlayingVoices;
@@ -44,6 +45,8 @@ private:
 	EMusic         m_playing = EMusic::Menu;
 	EMusic         m_lastPlayed = EMusic::Menu;
 
+	SLoopVoice    m_loopVoice;
+	
 	int    m_numChannels = 0;
 	double m_sampleRate = 0;
 	int    m_bufferLength = 0;
