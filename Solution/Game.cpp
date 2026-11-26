@@ -470,6 +470,9 @@ void CGame::UpdateProjectiles(unsigned int const frameTime)
 				pProjectile->UpdatePosition(frameTime, m_timeFactor);
 
 				SDL_Rect const& projectilePosition = pProjectile->GetRenderPosition();
+				
+				//TODO: check if sound has already started & make it loop while detached from player 
+				m_pAudioManager->Play(asset_audio_ballTravel01, true, { static_cast<float>(projectilePosition.x - (playerPosition.x + 30.0f)), static_cast<float>(projectilePosition.y) });
 
 				// collision with borders take precedence
 				if ((projectilePosition.y + projectilePosition.h) >= g_borderBottom)

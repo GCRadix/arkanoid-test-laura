@@ -29,6 +29,7 @@ constexpr unsigned int   g_targetFPS = 100;
 constexpr unsigned int   g_targetFrameTime = 1000 / g_targetFPS;
 
 constexpr int const      g_numCollisionSounds = 10;
+constexpr int const      g_numBallTravelSounds = 1;
 
 // Levels
 constexpr unsigned char const g_numLevels = 3;
@@ -104,7 +105,12 @@ constexpr char const* asset_audio_tileCollisions[g_numCollisionSounds]
 	asset_audio_tileCollision09,
 	asset_audio_tileCollision10
 };
-
+	
+constexpr char const* asset_audio_ballTravel01 = "../../../Assets/Audio/balltravel/woosh1.wav";
+constexpr char const* asset_audio_ballTravels[g_numBallTravelSounds]
+{
+	asset_audio_ballTravel01
+};
 
 constexpr char const* asset_audio_musicMenu = "../../../Assets/Audio/Music_menu.wav";
 constexpr char const* asset_audio_musicGameTension = "../../../Assets/Audio/Music_game_tension.wav";
