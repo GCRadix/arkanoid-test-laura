@@ -3,6 +3,7 @@
 #include "Global.h"
 #include "RenderedObject.h"
 #include <complex>
+#include <algorithm>
 
 namespace Arkanoid::Audio
 {
@@ -64,7 +65,9 @@ CAudioManager::CAudioManager()
 		44100,
 		false,
 		Vec2D(0.0f, 0.0f));
-
+	
+	bool loopSampleLoaded = LoadLoopSample(asset_audio_ballTravel01);
+	
 	Pa_OpenDefaultStream(
 		&m_pStream,
 		0,
@@ -229,16 +232,10 @@ void CAudioManager::RenderAudio(void* pOutputBuffer)
 			{
 				if (pPlayingVoice->positioned)
 				{
-					float const horizontalCenter = ((static_cast<float>(Arkanoid::Game::g_borderRight) - static_cast<float>(Arkanoid::Game::g_borderLeft)) * 0.5f);
-					float const posX = (pPlayingVoice->position.x) / horizontalCenter;
-					float const posY = (static_cast<float>(Arkanoid::Game::g_borderBottom) - pPlayingVoice->position.y) / static_cast<float>(Arkanoid::Game::g_borderBottom);
+					Vec2D pos(0.0f, 1.0f);
+					float distance = 0.0f;
+					CAudioMixer::ComputeListenerDirection(Vec2D(pPlayingVoice->position.x, pPlayingVoice->position.y), pos, distance);
 
-					float const distance = std::sqrtf(posX * posX + posY * posY);
-					float const scale = 1.0f / distance;
-					Vec2D pos;
-					pos.x = -posX * scale;
-					pos.y = posY * scale;
-					
 					if (m_pMixer->MixFile1InNPositional(m_pOutputBuffer, pPlayingVoice->pFile, pPlayingVoice->numChannels, pos, distance) != m_bufferLength)
 					{
 						m_pPlayingVoices.erase(m_pPlayingVoices.begin() + i);
@@ -258,6 +255,33 @@ void CAudioManager::RenderAudio(void* pOutputBuffer)
 			}
 		}
 	}
+
+	ELoopState const state = m_loopVoice.state.load();
+
+	if (state != ELoopState::Free)
+	{
+		bool const isRestart = (state == ELoopState::Playing) && (m_loopVoice.lastSeenState == ELoopState::Free);
+
+		if (isRestart)
+		{
+			m_loopVoice.readPos = 0.0;
+			m_loopVoice.gain = 0.0f;
+		}
+
+		float const targetGain = (state == ELoopState::Stopping) ? 0.0f : m_loopVoice.targetGain.load();
+		Vec2D const position(m_loopVoice.position.x.load(), m_loopVoice.position.y.load());
+
+		m_pOutputBuffer->pData = pOutputBuffer;
+		m_pMixer->MixLoop(m_pOutputBuffer, m_loopVoice, targetGain, m_loopVoice.targetRate.load(), position, isRestart);
+
+		if ((state == ELoopState::Stopping) && (m_loopVoice.gain <= 0.0001f))
+		{
+			ELoopState expected = ELoopState::Stopping;
+			m_loopVoice.state.compare_exchange_strong(expected, ELoopState::Free);
+		}
+	}
+
+	m_loopVoice.lastSeenState = m_loopVoice.state.load();
 }
 
 //////////////////////////////////////////////////////////////////////////////////
@@ -282,5 +306,95 @@ bool CAudioManager::UpdatePosition(SPlayingVoice* pPlayingVoice_, Vec2D const& p
 void CAudioManager::SetMusic(EMusic const music)
 {
 	m_playing = music;
+}
+
+bool CAudioManager::StartLoop(Vec2D const& position, float const gain,  float const rate)
+{
+	if (!m_loopVoice.isValid || (m_loopVoice.pSamples == nullptr))
+	{
+		return false; // Sample failed to load
+	}
+
+	m_loopVoice.position.x.store(position.x);
+	m_loopVoice.position.y.store(position.y);
+	m_loopVoice.targetGain.store(gain);
+	m_loopVoice.targetRate.store(std::clamp(rate, Game::g_loopRateMin, Game::g_loopRateMax));
+	m_loopVoice.state.store(ELoopState::Playing);
+
+	return true;
+}
+
+void CAudioManager::StopLoop()
+{
+	ELoopState expected = ELoopState::Playing;
+	m_loopVoice.state.compare_exchange_strong(expected, ELoopState::Stopping);
+}
+
+void CAudioManager::SetLoopGain(float)
+{
+}
+
+void CAudioManager::SetLoopRate(float const rate)
+{
+	float const clampedRate = std::clamp(rate, Game::g_loopRateMin, Game::g_loopRateMax);
+	m_loopVoice.targetRate.store(clampedRate);
+}
+
+void CAudioManager::SetLoopPosition(Vec2D)
+{
+}
+
+bool CAudioManager::LoadLoopSample(char const* filePath)
+{
+	SF_INFO sfInfo{ 0 };
+	SNDFILE* const pFile = sf_open(filePath, SFM_READ, &sfInfo);
+	
+	if (pFile == nullptr)
+	{
+		return false;
+	}
+
+	sf_count_t const numFrames = sfInfo.frames;
+	int const numFileChannels = sfInfo.channels;
+
+	if ((numFrames <= 0) || (numFileChannels <= 0))
+	{
+		sf_close(pFile);
+		return false;
+	}
+	
+	// Read the whole file interleaved, then downmix to mono so the loop can be panned like the other positioned voices.
+	std::vector<float> interleaved(static_cast<size_t>(numFrames * numFileChannels));
+	sf_count_t const framesRead = sf_readf_float(pFile, interleaved.data(), numFrames);
+	sf_close(pFile);
+
+	if (framesRead <= 0)
+	{
+		return false;
+	}
+
+	m_loopSampleData.assign(static_cast<size_t>(framesRead), 0.0f);
+	float const channelScale = 1.0f / static_cast<float>(numFileChannels);
+
+	for (sf_count_t frame = 0; frame < framesRead; ++frame)
+	{
+		float sum = 0.0f;
+
+		for (int channel = 0; channel < numFileChannels; ++channel)
+		{
+			sum += interleaved[static_cast<size_t>(frame * numFileChannels + channel)];
+		}
+
+		m_loopSampleData[static_cast<size_t>(frame)] = sum * channelScale;
+	}
+
+	m_loopVoice.pSamples   = m_loopSampleData.data();
+	m_loopVoice.numFrames  = framesRead;
+	m_loopVoice.sampleRate = sfInfo.samplerate;
+	//m_loopVoice.positioned = true;
+	m_loopVoice.isValid    = true;
+	m_loopVoice.state.store(ELoopState::Free);
+
+	return true;
 }
 } //Arkanoid::Audio

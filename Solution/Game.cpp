@@ -410,7 +410,7 @@ void CGame::UpdateProjectiles(unsigned int const frameTime)
 
 			m_waitForWKeyUp = true;
 			m_roundStarted = true;
-
+			
 			if (!m_pAttachedProjectiles.empty())
 			{
 				Vec2D pos = m_player.GetPosition();
@@ -455,6 +455,10 @@ void CGame::UpdateProjectiles(unsigned int const frameTime)
 				Vec2D pos = m_player.GetPosition();
 				pos.x += 23.0f;
 				pos.y -= 15.0f;
+				
+				//stop balltravel loop
+				m_pAudioManager->StopLoop();
+				
 				m_pAttachedProjectiles[m_pAttachedProjectiles.size() - 1]->SetPosition(pos);
 			}
 		}
@@ -470,11 +474,14 @@ void CGame::UpdateProjectiles(unsigned int const frameTime)
 				pProjectile->UpdatePosition(frameTime, m_timeFactor);
 
 				SDL_Rect const& projectilePosition = pProjectile->GetRenderPosition();
-
+				//ball travel loop
+				m_pAudioManager->StartLoop({ static_cast<float>(projectilePosition.x - (playerPosition.x + 30.0f)), static_cast<float>(projectilePosition.y) }, 1.0f, m_timeFactor);
+				m_pAudioManager->SetLoopPosition({static_cast<float>(projectilePosition.x), static_cast<float>(projectilePosition.y)});
 				// collision with borders take precedence
 				if ((projectilePosition.y + projectilePosition.h) >= g_borderBottom)
 				{
 					m_pProjectiles.erase((m_pProjectiles.begin() + i));
+					m_pAudioManager->StopLoop();
 
 					if (m_pProjectiles.empty())
 					{
