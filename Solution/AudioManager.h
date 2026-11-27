@@ -34,8 +34,8 @@ public:
 	void           SetMusic(EMusic const music);
 	bool		   StartLoop(Vec2D const& position, float const gain = 1.0,  float const rate = 1.0);
 	void		   StopLoop();
-	void		   SetLoopGain(float);
-	void		   SetLoopRate(float);
+	void		   SetLoopGain(float const gain);
+	void		   SetLoopRate(float const rate);
 	void		   SetLoopPosition(Vec2D);
 
 private:

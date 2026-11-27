@@ -17,6 +17,7 @@ enum class EGameState
 extern EGameState s_gameState;
 
 constexpr float          g_musicVolume = 0.05f;
+constexpr float          g_loopFadeSeconds = 0.1f; // Fade-in/out time of the ball travel loop
 
 constexpr unsigned short g_mapWidth = 400;
 constexpr unsigned short g_mapHeight = 500;
@@ -189,6 +190,10 @@ namespace Arkanoid::Game
 
 	constexpr unsigned int   g_score_tileDestroyed = 100;
 	constexpr unsigned int   g_score_tileDamaged = 50;
+	
+	constexpr float          g_baseTimeFactor = 1.3f; // m_timeFactor at the start of a game; the loop plays at rate 1.0 there
+	constexpr float          g_loopRateMin = 0.25f;
+	constexpr float          g_loopRateMax = 4.0f;
 }
 
 namespace Arkanoid::Audio

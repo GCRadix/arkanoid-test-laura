@@ -185,7 +185,6 @@
     <ClInclude Include="AudioManager.h" />
     <ClInclude Include="BiquadFilter.h" />
     <ClInclude Include="Game.h" />
-    <ClInclude Include="LoopVoice.h" />
     <ClInclude Include="Player.h" />
     <ClInclude Include="PlayingVoice.h" />
     <ClInclude Include="LoopVoice.h" />

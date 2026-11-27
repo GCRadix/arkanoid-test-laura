@@ -475,9 +475,8 @@ void CGame::UpdateProjectiles(unsigned int const frameTime)
 
 				SDL_Rect const& projectilePosition = pProjectile->GetRenderPosition();
 				//ball travel loop
-				//TODO: for better readability index as or some kind of identifier as param
-				m_pAudioManager->StartLoop({ static_cast<float>(projectilePosition.x - (playerPosition.x + 30.0f)), static_cast<float>(projectilePosition.y) });				
-
+				m_pAudioManager->StartLoop({ static_cast<float>(projectilePosition.x - (playerPosition.x + 30.0f)), static_cast<float>(projectilePosition.y) }, 1.0f, m_timeFactor);
+				m_pAudioManager->SetLoopPosition({static_cast<float>(projectilePosition.x), static_cast<float>(projectilePosition.y)});
 				// collision with borders take precedence
 				if ((projectilePosition.y + projectilePosition.h) >= g_borderBottom)
 				{

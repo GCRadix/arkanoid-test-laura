@@ -3,6 +3,7 @@
 #include "Global.h"
 #include "RenderedObject.h"
 #include <complex>
+#include <algorithm>
 
 namespace Arkanoid::Audio
 {
@@ -231,16 +232,10 @@ void CAudioManager::RenderAudio(void* pOutputBuffer)
 			{
 				if (pPlayingVoice->positioned)
 				{
-					float const horizontalCenter = ((static_cast<float>(Arkanoid::Game::g_borderRight) - static_cast<float>(Arkanoid::Game::g_borderLeft)) * 0.5f);
-					float const posX = (pPlayingVoice->position.x) / horizontalCenter;
-					float const posY = (static_cast<float>(Arkanoid::Game::g_borderBottom) - pPlayingVoice->position.y) / static_cast<float>(Arkanoid::Game::g_borderBottom);
+					Vec2D pos(0.0f, 1.0f);
+					float distance = 0.0f;
+					CAudioMixer::ComputeListenerDirection(Vec2D(pPlayingVoice->position.x, pPlayingVoice->position.y), pos, distance);
 
-					float const distance = std::sqrtf(posX * posX + posY * posY);
-					float const scale = 1.0f / distance;
-					Vec2D pos;
-					pos.x = -posX * scale;
-					pos.y = posY * scale;
-					
 					if (m_pMixer->MixFile1InNPositional(m_pOutputBuffer, pPlayingVoice->pFile, pPlayingVoice->numChannels, pos, distance) != m_bufferLength)
 					{
 						m_pPlayingVoices.erase(m_pPlayingVoices.begin() + i);
@@ -265,15 +260,19 @@ void CAudioManager::RenderAudio(void* pOutputBuffer)
 
 	if (state != ELoopState::Free)
 	{
-		if ((state == ELoopState::Playing) && (m_loopVoice.lastSeenState == ELoopState::Free))
+		bool const isRestart = (state == ELoopState::Playing) && (m_loopVoice.lastSeenState == ELoopState::Free);
+
+		if (isRestart)
 		{
 			m_loopVoice.readPos = 0.0;
 			m_loopVoice.gain = 0.0f;
 		}
 
 		float const targetGain = (state == ELoopState::Stopping) ? 0.0f : m_loopVoice.targetGain.load();
+		Vec2D const position(m_loopVoice.position.x.load(), m_loopVoice.position.y.load());
 
-		// ... mix the buffer, ramping m_loopVoice.gain towards targetGain per sample ...
+		m_pOutputBuffer->pData = pOutputBuffer;
+		m_pMixer->MixLoop(m_pOutputBuffer, m_loopVoice, targetGain, m_loopVoice.targetRate.load(), position, isRestart);
 
 		if ((state == ELoopState::Stopping) && (m_loopVoice.gain <= 0.0001f))
 		{
@@ -311,21 +310,17 @@ void CAudioManager::SetMusic(EMusic const music)
 
 bool CAudioManager::StartLoop(Vec2D const& position, float const gain,  float const rate)
 {
-	//m_loopVoice.positioned = positioned;
-	m_loopVoice.state.store(ELoopState::Playing);
-	m_loopVoice.lastSeenState = ELoopState::Playing;
-	
 	if (!m_loopVoice.isValid || (m_loopVoice.pSamples == nullptr))
-    {
-            return false; // Sample failed to load: no loop, but gameplay continues.
-    }
+	{
+		return false; // Sample failed to load
+	}
 
-    m_loopVoice.position.x.store(position.x);
-    m_loopVoice.position.y.store(position.y);
-    m_loopVoice.targetGain.store(gain);
-    m_loopVoice.targetRate.store(rate);
+	m_loopVoice.position.x.store(position.x);
+	m_loopVoice.position.y.store(position.y);
+	m_loopVoice.targetGain.store(gain);
+	m_loopVoice.targetRate.store(std::clamp(rate, Game::g_loopRateMin, Game::g_loopRateMax));
 	m_loopVoice.state.store(ELoopState::Playing);
-	
+
 	return true;
 }
 
@@ -333,6 +328,20 @@ void CAudioManager::StopLoop()
 {
 	ELoopState expected = ELoopState::Playing;
 	m_loopVoice.state.compare_exchange_strong(expected, ELoopState::Stopping);
+}
+
+void CAudioManager::SetLoopGain(float)
+{
+}
+
+void CAudioManager::SetLoopRate(float const rate)
+{
+	float const clampedRate = std::clamp(rate, Game::g_loopRateMin, Game::g_loopRateMax);
+	m_loopVoice.targetRate.store(clampedRate);
+}
+
+void CAudioManager::SetLoopPosition(Vec2D)
+{
 }
 
 bool CAudioManager::LoadLoopSample(char const* filePath)
@@ -382,7 +391,7 @@ bool CAudioManager::LoadLoopSample(char const* filePath)
 	m_loopVoice.pSamples   = m_loopSampleData.data();
 	m_loopVoice.numFrames  = framesRead;
 	m_loopVoice.sampleRate = sfInfo.samplerate;
-	m_loopVoice.positioned = true;
+	//m_loopVoice.positioned = true;
 	m_loopVoice.isValid    = true;
 	m_loopVoice.state.store(ELoopState::Free);
 
