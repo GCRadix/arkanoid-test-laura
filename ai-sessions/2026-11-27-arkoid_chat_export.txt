@@ -1,0 +1,1442 @@
+ ▐▛███▛█   Claude Code v2.1.332
+▝▜██████▀  Opus 5.5 · Claude Pro
+ ▝▝   ▝▝   D:\Github\ArknoidTest\Solution
+
+▎ [✻] [✻] [✻] · Share Claude Code and earn $10 in usage credits · /passes
+
+❯ /clear                                                                        
+
+❯ /init                                                                         
+
+  Searched for 3 patterns, read 4 files (ctrl+o to expand)
+
+● Update(D:\Github\ArknoidTest\CLAUDE.md)
+  ⎿  Added 3 lines
+      42  - `CAudioManager::Play` runs on the game thread. It calls `sf_o
+          pen` and `new SPlayingVoice`, then `push_back`s into `m_pPlayin
+          gVoices` (a vector of `shared_ptr`). The audio thread erases fr
+          om the same vector **without synchronization**. Treat this as a
+           known race. Don't copy the pattern.
+      43  - `SPlayingVoice` has no volume, pitch or loop state, and there
+           is no API to stop a voice. A voice ends only when its file run
+          s out.
+      44  - **Feature in progress (ball-travel loop):** `SLoopVoice` (`Lo
+          opVoice.h`) is a separate, real-time-safe voice type. `CAudioMa
+          nager` owns it as a member (`m_loopVoice`, not a heap object),
+          its samples are preloaded at startup by `LoadLoopSample`, and t
+          he game thread drives it through atomics (`state`, `targetGain`
+          , `targetRate`). The audio thread keeps its own copies (`lastSe
+          enState`, `readPos`, `gain`, `rate`). `NOTES.md` records the de
+          sign and the rejected "loop flag on `SPlayingVoice`" alternativ
+          e.
+      45 +  - The voice is header-only: `LoopVoice.cpp` was removed. The 
+         +game drives it from `CGame::UpdateProjectiles` (`StartLoop` / `
+         +SetLoopRate(m_timeFactor)` / `StopLoop`).                      
+      46 +  - Still unfinished: the per-sample mix in `RenderAudio` is a 
+         +placeholder comment, and `SetLoopGain` / `SetLoopPosition` are 
+         +empty stubs. `StartLoop` writes the audio-thread-only `lastSeen
+         +State` from the game thread, which defeats the Free→Playing res
+         +tart check (reset `readPos`/`gain`). Keep each audio-thread-onl
+         +y field owned by one thread.                                   
+      47 +  - `LoopVoice.h` is listed twice in the `.vcxproj` `ClInclude`
+         + group.                                                        
+      48 
+      49  **Constants and assets.** Everything is a `constexpr` in `Globa
+          l.h`: map and border sizes (`Arkanoid::Game::g_border*`), speed
+          s, `g_musicVolume`, and every `asset_*` path. Add new sound pat
+          hs there.
+      50 
+
+● I checked the existing CLAUDE.md against the code. The build commands, layout,
+  threading model, real-time constraints and conventions all still match, so I
+  left those sections alone.
+
+  The only part that was out of date was the "Feature in progress (ball-travel
+  loop)" section. I added a few lines there about where the loop voice currently
+  stands:
+
+  - Header-only now: LoopVoice.cpp is deleted (staged), so SLoopVoice lives only
+    in the header. The game starts it, sets its playback rate from the
+    bullet-time factor, and stops it, all from CGame::UpdateProjectiles.
+  - Still unfinished:
+    - The mixing step in RenderAudio is only a comment (AudioManager.cpp:277),
+      so the loop makes no sound yet.
+    - SetLoopGain and SetLoopPosition are empty.
+  - Bug in StartLoop: it sets lastSeenState, which only the audio thread should
+    touch. The audio thread uses that field to notice a fresh start and rewind
+    the loop (readPos/gain), so that rewind never happens. It also sets the
+    state to Playing before checking whether the sample loaded.
+  - Project file: LoopVoice.h is listed twice in Arkanoid Solution.vcxproj
+    (lines 188 and 191). It builds anyway, but one entry should go.
+
+  I didn't find any Cursor, Copilot, Codex or Gemini configs to bring in. Once
+  you finish the loop voice, the "Still unfinished" lines will be out of date
+  and should be trimmed.
+
+✻ Brewed for 30s · done 9:32
+
+❯ Show me an example of a mixing function for a loop voice                      
+
+  Read 3 files (ctrl+o to expand)
+
+● Here's a mixing function for SLoopVoice that fits the current code. It reads
+  the mono samples that LoadLoopSample already preloads, so the audio thread
+  never locks, allocates or touches the disk. It handles gain, playback rate and
+  stereo pan, smoothing each one per sample so changes don't click.
+
+  I haven't written this into the project or compiled it. Say if you want me to
+  add it.
+
+  Declaration (AudioManager.h, private section)
+
+  void MixLoopVoice(float* const pOutputBuffer);
+
+  Definition (AudioManager.cpp)
+
+  //////////////////////////////////////////////////////////////////////////////
+  ////
+  // Audio thread only. No locks, no heap allocation, no file I/O: it reads the 
+  preloaded mono samples.
+  void CAudioManager::MixLoopVoice(float* const pOutputBuffer)
+  {
+          SLoopVoice& voice = m_loopVoice;
+
+          if (!voice.isValid || (voice.pSamples == nullptr) || (voice.numFrames
+  < 2) || (m_numChannels < 2))
+          {
+                  return;
+          }
+
+          // Read every game-thread parameter once per buffer.
+          ELoopState const state = voice.state.load();
+          float const targetGain = (state == ELoopState::Stopping) ? 0.0f :
+  voice.targetGain.load();
+          float const targetRate = voice.targetRate.load();
+
+          // Constant-power stereo pan from the paddle-relative x (-1 = left, +1
+  = right).
+          float const horizontalCenter =
+  (static_cast<float>(Game::g_borderRight) -
+  static_cast<float>(Game::g_borderLeft)) * 0.5f;
+          float const panX = std::clamp(voice.position.x.load() /
+  horizontalCenter, -1.0f, 1.0f);
+          float const panAngle = (panX + 1.0f) * 0.25f * 3.14159265f; // 0 .. 
+  pi/2
+          float const targetPanLeft = std::cos(panAngle);
+          float const targetPanRight = std::sin(panAngle);
+
+          // One-pole smoothing with a time constant of about 10 ms, so changes 
+  to gain, rate and pan don't click.
+          float const smoothing = 1.0f - std::exp(-1.0f / (0.01f *
+  static_cast<float>(m_sampleRate)));
+
+          // The file's sample rate can differ from the device's.
+          double const sampleRateRatio = static_cast<double>(voice.sampleRate) /
+  m_sampleRate;
+          double const numFrames = static_cast<double>(voice.numFrames);
+
+          float* pOut = pOutputBuffer;
+
+          for (int i = 0; i < m_bufferLength; ++i)
+          {
+                  voice.gain     += (targetGain     - voice.gain)     *
+  smoothing;
+                  voice.rate     += (targetRate     - voice.rate)     *
+  smoothing;
+                  voice.panLeft  += (targetPanLeft  - voice.panLeft)  *
+  smoothing;
+                  voice.panRight += (targetPanRight - voice.panRight) *
+  smoothing;
+
+                  // Linear interpolation between neighbouring frames. After the
+  last frame it wraps to the first.
+                  auto const index0 = static_cast<sf_count_t>(voice.readPos);
+                  sf_count_t const index1 = ((index0 + 1) < voice.numFrames) ?
+  (index0 + 1) : 0;
+                  float const fraction = static_cast<float>(voice.readPos -
+  static_cast<double>(index0));
+                  float const sample = voice.pSamples[index0] +
+  ((voice.pSamples[index1] - voice.pSamples[index0]) * fraction);
+
+                  float const out = sample * voice.gain;
+                  pOut[0] += out * voice.panLeft;
+                  pOut[1] += out * voice.panRight;
+                  pOut += m_numChannels; // leave any extra channels untouched, 
+  as the stereo path in CAudioMixer does
+
+                  voice.readPos += voice.rate * sampleRateRatio;
+
+                  while (voice.readPos >= numFrames)
+                  {
+                          voice.readPos -= numFrames;
+                  }
+          }
+  }
+
+  Hooking it into RenderAudio
+
+  This replaces the placeholder comment at AudioManager.cpp:277:
+
+  if (state != ELoopState::Free)
+  {
+          if ((state == ELoopState::Playing) && (m_loopVoice.lastSeenState ==
+  ELoopState::Free))
+          {
+                  // Fresh start: rewind and snap rate and pan, so the voice 
+  fades in from silence at the right place.
+                  m_loopVoice.readPos  = 0.0;
+                  m_loopVoice.gain     = 0.0f;
+                  m_loopVoice.rate     = m_loopVoice.targetRate.load();
+                  m_loopVoice.panLeft  = 0.7071f;
+                  m_loopVoice.panRight = 0.7071f;
+          }
+
+          MixLoopVoice(static_cast<float*>(pOutputBuffer));
+
+          if ((state == ELoopState::Stopping) && (m_loopVoice.gain <= 0.0001f))
+          {
+                  ELoopState expected = ELoopState::Stopping;
+                  m_loopVoice.state.compare_exchange_strong(expected,
+  ELoopState::Free);
+          }
+  }
+
+  Design choices
+
+  - Fractional readPos with linear interpolation: this lets
+    SetLoopRate(m_timeFactor) slow the sound down smoothly in bullet time. It
+    also corrects for a WAV whose sample rate differs from the device's.
+  - Seamless wrap: at the last frame, interpolation continues into the first
+    one, so the loop has no gap at the seam. This only sounds clean if the WAV
+    itself loops cleanly.
+  - One-pole smoothing instead of a fixed linear ramp: it works the same however
+    often the game thread changes a target. A fade-out reaches your 0.0001
+    threshold in about 90 ms, and then the voice is set back to Free.
+  - Stereo only: the existing positional mixer also handles quad and 5.1
+    speakers, but this example writes only channels 0 and 1. Covering surround
+    would mean reusing that mixer's speaker-gain calculation. That's worth
+    noting in NOTES.md.
+
+  Things to change elsewhere for this to work
+
+  - Remove the lastSeenState write from StartLoop. As it stands, the restart
+    check above never fires, so a new ball would pick up wherever the old sound
+    left off. Also move the state.store(Playing) that comes before the isValid
+    check to after it.
+  - Fill in SetLoopPosition: it should store x and y into m_loopVoice.position.
+    Otherwise the pan only updates when StartLoop is called. In Game.cpp:481,
+    also pass the paddle-relative x rather than the absolute projectile
+    position.
+  - Includes: std::exp and std::cos need <cmath>, and std::clamp needs
+    <algorithm>. SetLoopRate already uses std::clamp, so <algorithm> is probably
+    reachable already.
+
+✻ Cooked for 47s · done 9:39
+
+❯ Can you write a helper function that implements the positioning to the sound  
+  an use it in MixFile1InNPositional as well as in MixLoopVoice?                
+
+  Searched for 1 pattern, read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● Your uncommitted AudioMixer.h declares MixLoop and ComputeStereoPan without
+  implementations yet. I'll add a shared helper to CAudioMixer, implement
+  MixLoop on it, and replace ComputeStereoPan so quad and 5.1 are covered too. 
+  · summary
+
+  Read 1 file (ctrl+o to expand)
+
+● Now the header: the gains struct, the two positioning helpers, and the MixLoop
+  declaration kept as you had it.
+
+● Update(AudioMixer.h)
+  ⎿  Added 9 lines
+       8  {
+       9  struct SAudioBuffer;
+      10 
+      11 +constexpr int g_maxPositionalChannels = 6;                     
+      12 +                                                               
+      13 +// Per-channel gains for a positioned mono source, in output ch
+         +annel order (FL, FR, RL, RR, SL, SR).                          
+      14 +struct SSpeakerGains final                                     
+      15 +{                                                              
+      16 +  float gains[g_maxPositionalChannels]{ 0.0f };                
+      17 +  int   numChannels = 0; // Channels to write: 2, 4 or 6. 0 mea
+         +ns the output can't be positioned (mono).                      
+      18 +};                                                             
+      19 +                                                               
+      20  class CAudioMixer
+      21  {
+      22  public:
+
+● Update(AudioMixer.h)
+  ⎿  Added 8 lines, removed 5 lines
+      36    sf_count_t MixFileNInN(SAudioBuffer const* const pOutBuffer, 
+          SNDFILE* const pFile, int const numFileChannels, float const vo
+          lume = 1.0f, bool const loop = false, bool const fade = false, 
+          bool const fadeIn = false);
+      37    sf_count_t MixFile1InNPositional(SAudioBuffer const* const pO
+          utBuffer, SNDFILE* const pFile, int const numFileChannels, Vec2
+          D const relativePosition, float const attenuationDistance = 0.0
+          f);
+      38 
+      39 -  // Real-time safe: reads only the voice's preloaded samples, 
+         -no file I/O or allocation. Mixes into the first two output chan
+         -nels.                                                          
+      39 +  // Real-time safe: reads only the voice's preloaded samples, 
+         +no file I/O or allocation.                                     
+      40 +  // relativePosition is in game pixels, x relative to the padd
+         +le centre (as passed to StartLoop).                            
+      41    void MixLoop(SAudioBuffer const* const pOutBuffer, SLoopVoice
+          & voice, float const targetGain, float const targetRate, Vec2D 
+          const relativePosition, bool const snapToTarget);
+      42 
+      43 +  // Positioning, shared by every positioned voice. Both are pu
+         +re functions and real-time safe.                               
+      44 +  // Turns a paddle-relative game position into a unit listener
+         + direction and a distance factor.                              
+      45 +  static void          ComputeListenerDirection(Vec2D const rel
+         +ativePosition, Vec2D& outDirection, float& outDistance);       
+      46 +  // Speaker gains (panning and distance attenuation) for a mon
+         +o source in that direction.                                    
+      47 +  static SSpeakerGains ComputeSpeakerGains(Vec2D const directio
+         +n, float const distanceFactor, int const numBufferChannels);   
+      48 +                                                               
+      49    void*         m_pBufferData;
+      50    SAudioBuffer* m_pMixBuffer;
+      44 -                                                               
+      45 -private:                                                       
+      46 -                                                               
+      47 -  void ComputeStereoPan(Vec2D const relativePosition, float& ou
+         -tLeft, float& outRight) const;                                 
+      51  };
+      52  } // Arkanoid::Audio
+
+● Update(LoopVoice.h)
+  ⎿  Added 1 line, removed 2 lines
+      34    double     readPos = 0.0;
+      35    float      gain = 0.0f;
+      36    float      rate = 1.0f;
+      37 -  float      panLeft = 1.0f;                                   
+      38 -  float      panRight = 1.0f;                                  
+      37 +  float      channelGains[6]{ 0.0f }; // Smoothed speaker gains
+         + (FL, FR, RL, RR, SL, SR); size matches g_maxPositionalChannels
+         +.                                                              
+      38  };
+      39  } // Arkanoid::Audio
+
+● LoopVoice.h can't reference g_maxPositionalChannels because AudioMixer.h
+  includes it, so I hardcoded 6 and will add a static_assert in the .cpp; next
+  I'm moving to the mixer implementation. · summary
+
+● Write(AudioMixer.cpp)
+  ⎿  Added 261 lines, removed 170 lines
+       2  #define _USE_MATH_DEFINES
+       3  #include <math.h>
+       4  #include <xutility>
+       5 +#include <algorithm>                                           
+       6 
+       7  namespace Arkanoid::Audio
+       8  {
+       9 +static_assert(sizeof(SLoopVoice::channelGains) / sizeof(float) 
+         +== g_maxPositionalChannels, "SLoopVoice::channelGains must hold
+         + g_maxPositionalChannels gains");                              
+      10 +                                                               
+      11  ///////////////////////////////////////////////////////////////
+          ///////////////////
+      12  sf_count_t CAudioMixer::MixFileNInN(SAudioBuffer const* const p
+          OutBuffer, SNDFILE* const pFile, int const numFileChannels, flo
+          at const volume, bool const loop, bool const fade, bool const f
+          adeIn)
+      13  {
+     ...
+       85  {
+       86    std::fill(static_cast<float*>(m_pMixBuffer->pData), static_c
+           ast<float*>(m_pMixBuffer->pData) + ((m_pMixBuffer->bufferLengt
+           h) * m_pMixBuffer->numChannels), 0.0f);
+       87 
+       85 -  sf_count_t numFramesRead = 0;                               
+       88 +  SSpeakerGains const speakerGains = ComputeSpeakerGains(relat
+          +iveRotation, distanceFactor, pOutBuffer->numChannels);        
+       89 
+       90    // We expect at least 2 channels to mix positional audio
+       88 -  if (pOutBuffer->numChannels == 1)                           
+       91 +  if (speakerGains.numChannels == 0)                          
+       92    {
+       90 -    return numFramesRead;                                     
+       93 +    return 0;                                                 
+       94    }
+       95 
+       96 +  int const numBufferChannels = pOutBuffer->numChannels;      
+       97 +  auto const requestedSamples = static_cast<sf_count_t>(pOutBu
+          +ffer->bufferLength);                                          
+       98 +  auto pStreamBuffer = static_cast<float*>(pOutBuffer->pData);
+       99 +  auto const pMixBuffer = static_cast<float*>(m_pMixBuffer->pD
+          +ata);                                                         
+      100 +                                                              
+      101 +  sf_count_t const numFramesRead = sf_readf_float(pFile, pMixB
+          +uffer, requestedSamples);                                     
+      102 +                                                              
+      103 +  for (sf_count_t i = 0; i < numFramesRead; ++i)              
+      104 +  {                                                           
+      105 +    float const sample = pMixBuffer[i * numFileChannels];     
+      106 +                                                              
+      107 +    for (int j = 0; j < speakerGains.numChannels; ++j)        
+      108 +    {                                                         
+      109 +      *pStreamBuffer++ += sample * speakerGains.gains[j];     
+      110 +    }                                                         
+      111 +                                                              
+      112 +    pStreamBuffer += (numBufferChannels - speakerGains.numChan
+          +nels);                                                        
+      113 +  }                                                           
+      114 +                                                              
+      115 +  return numFramesRead;                                       
+      116 +}                                                             
+      117 +                                                              
+      118 +//////////////////////////////////////////////////////////////
+          +////////////////////                                          
+      119 +void CAudioMixer::MixLoop(SAudioBuffer const* const pOutBuffer
+          +, SLoopVoice& voice, float const targetGain, float const targe
+          +tRate, Vec2D const relativePosition, bool const snapToTarget) 
+      120 +{                                                             
+      121 +  if (!voice.isValid || (voice.pSamples == nullptr) || (voice.
+          +numFrames < 2) || (voice.sampleRate <= 0))                    
+      122 +  {                                                           
+      123 +    return;                                                   
+      124 +  }                                                           
+      125 +                                                              
+      126 +  Vec2D direction(0.0f, 1.0f);                                
+      127 +  float distance = 0.0f;                                      
+      128 +  ComputeListenerDirection(relativePosition, direction, distan
+          +ce);                                                          
+      129 +  SSpeakerGains const speakerGains = ComputeSpeakerGains(direc
+          +tion, distance, pOutBuffer->numChannels);                     
+      130 +                                                              
+      131 +  if (speakerGains.numChannels == 0)                          
+      132 +  {                                                           
+      133 +    voice.gain = 0.0f; // Nothing can be heard on a mono outpu
+          +t; let a stopping voice be freed.                             
+      134 +    return;                                                   
+      135 +  }                                                           
+      136 +                                                              
+      137 +  auto const outputSampleRate = static_cast<float>(pOutBuffer-
+          +>sampleRate);                                                 
+      138 +  float const gainStep = 1.0f / (g_loopFadeSeconds * outputSam
+          +pleRate);      // Linear fade, so a fade-out reaches exactly 0
+          +.                                                             
+      139 +  float const smoothing = 1.0f - expf(-1.0f / (0.01f * outputS
+          +ampleRate));  // ~10 ms one-pole for rate and panning.        
+      140 +                                                              
+      141 +  if (snapToTarget)                                           
+      142 +  {                                                           
+      143 +    voice.rate = targetRate;                                  
+      144 +                                                              
+      145 +    for (int j = 0; j < g_maxPositionalChannels; ++j)         
+      146 +    {                                                         
+      147 +      voice.channelGains[j] = speakerGains.gains[j];          
+      148 +    }                                                         
+      149 +  }                                                           
+      150 +                                                              
+      151 +  // The file's sample rate can differ from the device's.     
+      152 +  double const sampleRateRatio = static_cast<double>(voice.sam
+          +pleRate) / pOutBuffer->sampleRate;                            
+      153 +  auto const numFrames = static_cast<double>(voice.numFrames);
+      154 +  int const numBufferChannels = pOutBuffer->numChannels;      
+      155 +  auto pStreamBuffer = static_cast<float*>(pOutBuffer->pData);
+      156 +                                                              
+      157 +  for (unsigned int i = 0; i < pOutBuffer->bufferLength; ++i) 
+      158 +  {                                                           
+      159 +    if (voice.gain < targetGain)                              
+      160 +    {                                                         
+      161 +      voice.gain = std::min(voice.gain + gainStep, targetGain)
+          +;                                                             
+      162 +    }                                                         
+      163 +    else if (voice.gain > targetGain)                         
+      164 +    {                                                         
+      165 +      voice.gain = std::max(voice.gain - gainStep, targetGain)
+          +;                                                             
+      166 +    }                                                         
+      167 +                                                              
+      168 +    voice.rate += (targetRate - voice.rate) * smoothing;      
+      169 +                                                              
+      170 +    // Linear interpolation between neighbouring frames; after
+          + the last frame it wraps to the first.                        
+      171 +    auto const index0 = static_cast<sf_count_t>(voice.readPos)
+          +;                                                             
+      172 +    sf_count_t const index1 = ((index0 + 1) < voice.numFrames)
+          + ? (index0 + 1) : 0;                                          
+      173 +    float const fraction = static_cast<float>(voice.readPos - 
+          +static_cast<double>(index0));                                 
+      174 +    float const sample = (voice.pSamples[index0] + ((voice.pSa
+          +mples[index1] - voice.pSamples[index0]) * fraction)) * voice.g
+          +ain;                                                          
+      175 +                                                              
+      176 +    for (int j = 0; j < speakerGains.numChannels; ++j)        
+      177 +    {                                                         
+      178 +      voice.channelGains[j] += (speakerGains.gains[j] - voice.
+          +channelGains[j]) * smoothing;                                 
+      179 +      *pStreamBuffer++ += sample * voice.channelGains[j];     
+      180 +    }                                                         
+      181 +                                                              
+      182 +    pStreamBuffer += (numBufferChannels - speakerGains.numChan
+          +nels);                                                        
+      183 +                                                              
+      184 +    voice.readPos += static_cast<double>(voice.rate) * sampleR
+          +ateRatio;                                                     
+      185 +                                                              
+      186 +    while (voice.readPos >= numFrames)                        
+      187 +    {                                                         
+      188 +      voice.readPos -= numFrames;                             
+      189 +    }                                                         
+      190 +  }                                                           
+      191 +}                                                             
+      192 +                                                              
+      193 +//////////////////////////////////////////////////////////////
+          +////////////////////                                          
+      194 +void CAudioMixer::ComputeListenerDirection(Vec2D const relativ
+          +ePosition, Vec2D& outDirection, float& outDistance)           
+      195 +{                                                             
+      196 +  float const horizontalCenter = ((static_cast<float>(Arkanoid
+          +::Game::g_borderRight) - static_cast<float>(Arkanoid::Game::g_
+          +borderLeft)) * 0.5f);                                         
+      197 +  float const posX = relativePosition.x / horizontalCenter;   
+      198 +  float const posY = (static_cast<float>(Arkanoid::Game::g_bor
+          +derBottom) - relativePosition.y) / static_cast<float>(Arkanoid
+          +::Game::g_borderBottom);                                      
+      199 +                                                              
+      200 +  float const distance = sqrtf(posX * posX + posY * posY);    
+      201 +                                                              
+      202 +  // A source right on the listener has no direction: treat it
+          + as straight ahead and unattenuated instead of dividing by zer
+          +o.                                                            
+      203 +  if (distance <= 0.0001f)                                    
+      204 +  {                                                           
+      205 +    outDirection = Vec2D(0.0f, 1.0f);                         
+      206 +    outDistance = 0.0f;                                       
+      207 +    return;                                                   
+      208 +  }                                                           
+      209 +                                                              
+      210 +  float const scale = 1.0f / distance;                        
+      211 +  outDirection = Vec2D(-posX * scale, posY * scale);          
+      212 +  outDistance = distance;                                     
+      213 +}                                                             
+      214 +                                                              
+      215 +//////////////////////////////////////////////////////////////
+          +////////////////////                                          
+      216 +SSpeakerGains CAudioMixer::ComputeSpeakerGains(Vec2D const dir
+          +ection, float const distanceFactor, int const numBufferChannel
+          +s)                                                            
+      217 +{                                                             
+      218 +  SSpeakerGains speakerGains;                                 
+      219 +                                                              
+      220 +  // We expect at least 2 channels to mix positional audio    
+      221 +  if (numBufferChannels < 2)                                  
+      222 +  {                                                           
+      223 +    return speakerGains;                                      
+      224 +  }                                                           
+      225 +                                                              
+      226    // TODO: there should be a global for this.
+      227    float volumeAttenuation = 1.0f;
+      228    if (distanceFactor != 0.0f)
+      229    {
+      230      volumeAttenuation = 1.0f - (distanceFactor * 0.6f);
+       98 -                                                              
+      231 +                                                              
+      232      if (volumeAttenuation < 0.0f) volumeAttenuation = 0.0f;
+      233      if (volumeAttenuation > 1.0f) volumeAttenuation = 1.0f;
+      234    }
+      235 
+      236 +  float const directionLength = sqrtf(direction.x * direction.
+          +x + direction.y * direction.y);                               
+      237    float const listenerCosine =
+      104 -    relativeRotation.y                                        
+      105 -    / (sqrtf(relativeRotation.x * relativeRotation.x + relativ
+          -eRotation.y * relativeRotation.y));                           
+      238 +    (directionLength > 0.0f)                                  
+      239 +    ? std::clamp(direction.y / directionLength, -1.0f, 1.0f) /
+          +/ clamp: rounding must not push acosf out of its domain       
+      240 +    : 1.0f;                                                   
+      241 
+      242    // Differentiate between Stereo(up to 2.1) and surround setu
+           ps
+      108 -  if (pOutBuffer->numChannels <= 3)                           
+      243 +  if (numBufferChannels <= 3)                                 
+      244    {
+      245      float volumeRight = 1.0f;
+      246      float volumeLeft = 1.0f;
+      247 
+      113 -    if (relativeRotation.x < 0.0f)                            
+      248 +    if (direction.x < 0.0f)                                   
+      249      {
+      250        float directionFactor = fabsf(listenerCosine);
+      251        directionFactor = (powf(g_euler, (2.0f * (directionFacto
+           r - 1.0f))) * directionFactor);
+     ...
+      260        volumeRight = 0.1f + (directionFactor * 0.6f);
+      261      }
+      262 
+      128 -    int const numBufferChannels = pOutBuffer->numChannels;    
+      129 -    auto requestedSamples = static_cast<sf_count_t>(pOutBuffer
+          -->bufferLength);                                              
+      130 -    auto pStreamBuffer = static_cast<float*>(pOutBuffer->pData
+          -);                                                            
+      131 -    auto const pMixBuffer = static_cast<float*>(m_pMixBuffer->
+          -pData);                                                       
+      263 +    speakerGains.gains[0] = volumeLeft * volumeAttenuation;   
+      264 +    speakerGains.gains[1] = volumeRight * volumeAttenuation;  
+      265 +    speakerGains.numChannels = 2;                             
+      266 
+      133 -    numFramesRead = sf_readf_float(pFile, pMixBuffer, requeste
+          -dSamples);                                                    
+      134 -                                                              
+      135 -    for (sf_count_t i = 0; i < numFramesRead; ++i)            
+      136 -    {                                                         
+      137 -      *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * vo
+          -lumeLeft * volumeAttenuation;                                 
+      138 -      *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * vo
+          -lumeRight * volumeAttenuation;                                
+      139 -                                                              
+      140 -      pStreamBuffer += (numBufferChannels - 2);               
+      141 -    }                                                         
+      267 +    return speakerGains;                                      
+      268    }
+      143 -  else                                                        
+      144 -  {                                                           
+      145 -    // panning over 3 Speakers with 1 primary and 2 secondary 
+          -channels                                                      
+      146 -    // Assuming the most common setups for now without center:
+          - Quad and 6 Speaker surround                                  
+      147 -    float listenerAngle = (acosf(listenerCosine) * (180.0f / s
+          -tatic_cast<float>(M_PI)));                                    
+      269 
+      149 -    listenerAngle =                                           
+      150 -      (relativeRotation.x > 0.0f)                             
+      151 -      ? listenerAngle                                         
+      152 -      : 360.0f - listenerAngle;                               
+      270 +  // panning over 3 Speakers with 1 primary and 2 secondary ch
+          +annels                                                        
+      271 +  // Assuming the most common setups for now without center: Q
+          +uad and 6 Speaker surround                                    
+      272 +  float listenerAngle = (acosf(listenerCosine) * (180.0f / sta
+          +tic_cast<float>(M_PI)));                                      
+      273 
+      154 -    int const numBufferChannels = pOutBuffer->numChannels;    
+      155 -    int const channelsToWrite = (numBufferChannels > 7) ? 6 : 
+          -4;                                                            
+      274 +  listenerAngle =                                             
+      275 +    (direction.x > 0.0f)                                      
+      276 +    ? listenerAngle                                           
+      277 +    : 360.0f - listenerAngle;                                 
+      278 
+      157 -    float quadrantProxy = 0.0f;                               
+      158 -    float quadrantFine = listenerAngle / (360.0f / channelsToW
+          -rite);                                                        
+      159 -    quadrantFine = modff(quadrantFine, &quadrantProxy);       
+      160 -    int const quadrant = static_cast<int>(quadrantProxy);     
+      161 -    float const quadrantFinePrimary = (quadrantFine < 0.5f) ? 
+          -quadrantFine * 2.0f : 1.0f - (quadrantFine - 0.5f) * 1.0f;    
+      279 +  int const channelsToWrite = (numBufferChannels > 7) ? 6 : 4;
+      280 
+      163 -    float const volumeSecondaryLeft = 0.7f * quadrantFine;    
+      164 -    float const volumePrimary = 0.7f + (0.25f * quadrantFinePr
+          -imary);                                                       
+      165 -    float const volumeSecondaryRight = 0.7f * (1.0f - quadrant
+          -Fine);                                                        
+      281 +  float quadrantProxy = 0.0f;                                 
+      282 +  float quadrantFine = listenerAngle / (360.0f / channelsToWri
+          +te);                                                          
+      283 +  quadrantFine = modff(quadrantFine, &quadrantProxy);         
+      284 +  int const quadrant = static_cast<int>(quadrantProxy);       
+      285 +  float const quadrantFinePrimary = (quadrantFine < 0.5f) ? qu
+          +adrantFine * 2.0f : 1.0f - (quadrantFine - 0.5f) * 1.0f;      
+      286 
+      167 -    float volumeFrontLeft = 0.0f;                             
+      168 -    float volumeFrontRight = 0.0f;                            
+      169 -    float volumeRearLeft = 0.0f;                              
+      170 -    float volumeRearRight = 0.0f;                             
+      171 -    float volumeSideLeft = 0.0f;                              
+      172 -    float volumeSideRight = 0.0f;                             
+      287 +  float const volumeSecondaryLeft = 0.7f * quadrantFine;      
+      288 +  float const volumePrimary = 0.7f + (0.25f * quadrantFinePrim
+          +ary);                                                         
+      289 +  float const volumeSecondaryRight = 0.7f * (1.0f - quadrantFi
+          +ne);                                                          
+      290 
+      174 -    switch (quadrant)                                         
+      291 +  float volumeFrontLeft = 0.0f;                               
+      292 +  float volumeFrontRight = 0.0f;                              
+      293 +  float volumeRearLeft = 0.0f;                                
+      294 +  float volumeRearRight = 0.0f;                               
+      295 +  float volumeSideLeft = 0.0f;                                
+      296 +  float volumeSideRight = 0.0f;                               
+      297 +                                                              
+      298 +  switch (quadrant)                                           
+      299 +  {                                                           
+      300 +  case 0:                                                     
+      301      {
+      176 -    case 0:                                                   
+      302 +      if (channelsToWrite == 4)                               
+      303        {
+      178 -        if (channelsToWrite == 4)                             
+      179 -        {                                                     
+      180 -          volumeFrontLeft = volumePrimary;                    
+      181 -          volumeFrontRight = volumeSecondaryRight;            
+      182 -          volumeRearLeft = volumeSecondaryLeft;               
+      183 -          volumeRearRight = 0.0f;                             
+      184 -        }                                                     
+      185 -        else                                                  
+      186 -        {                                                     
+      187 -          volumeFrontLeft = volumePrimary;                    
+      188 -          volumeFrontRight = volumeSecondaryRight;            
+      189 -          volumeRearLeft = 0.0f;                              
+      190 -          volumeRearRight = 0.0f;                             
+      191 -          volumeSideLeft = volumeSecondaryLeft;               
+      192 -          volumeSideRight = 0.0f;                             
+      193 -        }                                                     
+      194 -                                                              
+      195 -        break;                                                
+      304 +        volumeFrontLeft = volumePrimary;                      
+      305 +        volumeFrontRight = volumeSecondaryRight;              
+      306 +        volumeRearLeft = volumeSecondaryLeft;                 
+      307 +        volumeRearRight = 0.0f;                               
+      308        }
+      197 -    case 1:                                                   
+      309 +      else                                                    
+      310        {
+      199 -        if (channelsToWrite == 4)                             
+      200 -        {                                                     
+      201 -          volumeFrontLeft = volumeSecondaryRight;             
+      202 -          volumeFrontRight = 0.0f;                            
+      203 -          volumeRearLeft = volumePrimary;                     
+      204 -          volumeRearRight = volumeSecondaryLeft;              
+      205 -        }                                                     
+      206 -        else                                                  
+      207 -        {                                                     
+      208 -          volumeFrontLeft = volumeSecondaryRight;             
+      209 -          volumeFrontRight = 0.0f;                            
+      210 -          volumeRearLeft = volumeSecondaryLeft;               
+      211 -          volumeRearRight = 0.0f;                             
+      212 -          volumeSideLeft = volumePrimary;                     
+      213 -          volumeSideRight = 0.0f;                             
+      214 -        }                                                     
+      215 -                                                              
+      216 -        break;                                                
+      311 +        volumeFrontLeft = volumePrimary;                      
+      312 +        volumeFrontRight = volumeSecondaryRight;              
+      313 +        volumeRearLeft = 0.0f;                                
+      314 +        volumeRearRight = 0.0f;                               
+      315 +        volumeSideLeft = volumeSecondaryLeft;                 
+      316 +        volumeSideRight = 0.0f;                               
+      317        }
+      218 -    case 2:                                                   
+      219 -      {                                                       
+      220 -        if (channelsToWrite == 4)                             
+      221 -        {                                                     
+      222 -          volumeFrontLeft = 0.0f;                             
+      223 -          volumeFrontRight = volumeSecondaryLeft;             
+      224 -          volumeRearLeft = volumeSecondaryRight;              
+      225 -          volumeRearRight = volumePrimary;                    
+      226 -        }                                                     
+      227 -        else                                                  
+      228 -        {                                                     
+      229 -          volumeFrontLeft = 0.0f;                             
+      230 -          volumeFrontRight = 0.0f;                            
+      231 -          volumeRearLeft = volumePrimary;                     
+      232 -          volumeRearRight = volumeSecondaryLeft;              
+      233 -          volumeSideLeft = volumeSecondaryRight;              
+      234 -          volumeSideRight = 0.0f;                             
+      235 -        }                                                     
+      318 
+      237 -        break;                                                
+      319 +      break;                                                  
+      320 +    }                                                         
+      321 +  case 1:                                                     
+      322 +    {                                                         
+      323 +      if (channelsToWrite == 4)                               
+      324 +      {                                                       
+      325 +        volumeFrontLeft = volumeSecondaryRight;               
+      326 +        volumeFrontRight = 0.0f;                              
+      327 +        volumeRearLeft = volumePrimary;                       
+      328 +        volumeRearRight = volumeSecondaryLeft;                
+      329        }
+      239 -    case 3:                                                   
+      330 +      else                                                    
+      331        {
+      241 -        if (channelsToWrite == 4)                             
+      242 -        {                                                     
+      243 -          volumeFrontLeft = volumeSecondaryLeft;              
+      244 -          volumeFrontRight = volumePrimary;                   
+      245 -          volumeRearLeft = 0.0f;                              
+      246 -          volumeRearRight = volumeSecondaryRight;             
+      247 -        }                                                     
+      248 -        else                                                  
+      249 -        {                                                     
+      250 -          volumeFrontLeft = 0.0f;                             
+      251 -          volumeFrontRight = 0.0f;                            
+      252 -          volumeRearLeft = volumeSecondaryRight;              
+      253 -          volumeRearRight = volumePrimary;                    
+      254 -          volumeSideLeft = 0.0f;                              
+      255 -          volumeSideRight = volumeSecondaryLeft;              
+      256 -        }                                                     
+      257 -                                                              
+      258 -        break;                                                
+      332 +        volumeFrontLeft = volumeSecondaryRight;               
+      333 +        volumeFrontRight = 0.0f;                              
+      334 +        volumeRearLeft = volumeSecondaryLeft;                 
+      335 +        volumeRearRight = 0.0f;                               
+      336 +        volumeSideLeft = volumePrimary;                       
+      337 +        volumeSideRight = 0.0f;                               
+      338        }
+      260 -    case 4:                                                   
+      339 +                                                              
+      340 +      break;                                                  
+      341 +    }                                                         
+      342 +  case 2:                                                     
+      343 +    {                                                         
+      344 +      if (channelsToWrite == 4)                               
+      345        {
+      346          volumeFrontLeft = 0.0f;
+      347          volumeFrontRight = volumeSecondaryLeft;
+      264 -        volumeRearLeft = 0.0f;                                
+      265 -        volumeRearRight = volumeSecondaryRight;               
+      266 -        volumeSideLeft = 0.0f;                                
+      267 -        volumeSideRight = volumePrimary;                      
+      268 -                                                              
+      269 -        break;                                                
+      348 +        volumeRearLeft = volumeSecondaryRight;                
+      349 +        volumeRearRight = volumePrimary;                      
+      350        }
+      271 -    case 5:                                                   
+      351 +      else                                                    
+      352        {
+      353 +        volumeFrontLeft = 0.0f;                               
+      354 +        volumeFrontRight = 0.0f;                              
+      355 +        volumeRearLeft = volumePrimary;                       
+      356 +        volumeRearRight = volumeSecondaryLeft;                
+      357 +        volumeSideLeft = volumeSecondaryRight;                
+      358 +        volumeSideRight = 0.0f;                               
+      359 +      }                                                       
+      360 +                                                              
+      361 +      break;                                                  
+      362 +    }                                                         
+      363 +  case 3:                                                     
+      364 +    {                                                         
+      365 +      if (channelsToWrite == 4)                               
+      366 +      {                                                       
+      367          volumeFrontLeft = volumeSecondaryLeft;
+      368          volumeFrontRight = volumePrimary;
+      369          volumeRearLeft = 0.0f;
+      276 -        volumeRearRight = 0.0f;                               
+      277 -        volumeSideLeft = 0.0f;                                
+      278 -        volumeSideRight = volumeSecondaryRight;               
+      279 -                                                              
+      280 -        break;                                                
+      370 +        volumeRearRight = volumeSecondaryRight;               
+      371        }
+      282 -    default:                                                  
+      372 +      else                                                    
+      373        {
+      374          volumeFrontLeft = 0.0f;
+      375          volumeFrontRight = 0.0f;
+      286 -        volumeRearLeft = 0.0f;                                
+      287 -        volumeRearRight = 0.0f;                               
+      376 +        volumeRearLeft = volumeSecondaryRight;                
+      377 +        volumeRearRight = volumePrimary;                      
+      378          volumeSideLeft = 0.0f;
+      289 -        volumeSideRight = 0.0f;                               
+      290 -                                                              
+      291 -        break;                                                
+      379 +        volumeSideRight = volumeSecondaryLeft;                
+      380        }
+      293 -    }                                                         
+      381 
+      295 -    auto const requestedSamples = static_cast<sf_count_t>(pOut
+          -Buffer->bufferLength);                                        
+      296 -    auto pStreamBuffer = static_cast<float*>(pOutBuffer->pData
+          -);                                                            
+      297 -    auto const pMixBuffer = static_cast<float*>(m_pMixBuffer->
+          -pData);                                                       
+      298 -                                                              
+      299 -    numFramesRead = sf_readf_float(pFile, pMixBuffer, requeste
+          -dSamples);                                                    
+      300 -                                                              
+      301 -    if (channelsToWrite == 4)                                 
+      382 +      break;                                                  
+      383 +    }                                                         
+      384 +  case 4:                                                     
+      385      {
+      303 -      for (sf_count_t i = 0; i < numFramesRead; ++i)          
+      304 -      {                                                       
+      305 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeFrontLeft * volumeAttenuation;                          
+      306 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeFrontRight * volumeAttenuation;                         
+      307 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeRearLeft * volumeAttenuation;                           
+      308 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeRearRight * volumeAttenuation;                          
+      386 +      volumeFrontLeft = 0.0f;                                 
+      387 +      volumeFrontRight = volumeSecondaryLeft;                 
+      388 +      volumeRearLeft = 0.0f;                                  
+      389 +      volumeRearRight = volumeSecondaryRight;                 
+      390 +      volumeSideLeft = 0.0f;                                  
+      391 +      volumeSideRight = volumePrimary;                        
+      392 
+      310 -        pStreamBuffer += (numBufferChannels - channelsToWrite)
+          -;                                                             
+      311 -      }                                                       
+      393 +      break;                                                  
+      394      }
+      313 -    else                                                      
+      395 +  case 5:                                                     
+      396      {
+      315 -      for (sf_count_t i = 0; i < numFramesRead; ++i)          
+      316 -      {                                                       
+      317 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeFrontLeft * volumeAttenuation;                          
+      318 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeFrontRight * volumeAttenuation;                         
+      319 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeRearLeft * volumeAttenuation;                           
+      320 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeRearRight * volumeAttenuation;                          
+      321 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeSideLeft * volumeAttenuation;                           
+      322 -        *pStreamBuffer++ += pMixBuffer[i * numFileChannels] * 
+          -volumeSideRight * volumeAttenuation;                          
+      397 +      volumeFrontLeft = volumeSecondaryLeft;                  
+      398 +      volumeFrontRight = volumePrimary;                       
+      399 +      volumeRearLeft = 0.0f;                                  
+      400 +      volumeRearRight = 0.0f;                                 
+      401 +      volumeSideLeft = 0.0f;                                  
+      402 +      volumeSideRight = volumeSecondaryRight;                 
+      403 
+      324 -        pStreamBuffer += (numBufferChannels - channelsToWrite)
+          -;                                                             
+      325 -      }                                                       
+      404 +      break;                                                  
+      405      }
+      406 +  default:                                                    
+      407 +    {                                                         
+      408 +      break;                                                  
+      409 +    }                                                         
+      410    }
+      411 
+      329 -  return numFramesRead;                                       
+      412 +  speakerGains.gains[0] = volumeFrontLeft * volumeAttenuation;
+      413 +  speakerGains.gains[1] = volumeFrontRight * volumeAttenuation
+          +;                                                             
+      414 +  speakerGains.gains[2] = volumeRearLeft * volumeAttenuation; 
+      415 +  speakerGains.gains[3] = volumeRearRight * volumeAttenuation;
+      416 +  speakerGains.gains[4] = volumeSideLeft * volumeAttenuation; 
+      417 +  speakerGains.gains[5] = volumeSideRight * volumeAttenuation;
+      418 +  speakerGains.numChannels = channelsToWrite;                 
+      419 +                                                              
+      420 +  return speakerGains;                                        
+      421  }
+      422  } // Arkanoid::Audio
+
+● Now RenderAudio: the positioned voices use the shared direction helper, and
+  the loop placeholder calls MixLoop.
+
+● Update(AudioManager.cpp)
+  ⎿  Added 3 lines, removed 9 lines
+      232        {
+      233          if (pPlayingVoice->positioned)
+      234          {
+      235 -          float const horizontalCenter = ((static_cast<float>(
+          -Arkanoid::Game::g_borderRight) - static_cast<float>(Arkanoid::
+          -Game::g_borderLeft)) * 0.5f);                                 
+      236 -          float const posX = (pPlayingVoice->position.x) / hor
+          -izontalCenter;                                                
+      237 -          float const posY = (static_cast<float>(Arkanoid::Gam
+          -e::g_borderBottom) - pPlayingVoice->position.y) / static_cast<
+          -float>(Arkanoid::Game::g_borderBottom);                       
+      235 +          Vec2D pos(0.0f, 1.0f);                              
+      236 +          float distance = 0.0f;                              
+      237 +          CAudioMixer::ComputeListenerDirection(Vec2D(pPlaying
+          +Voice->position.x, pPlayingVoice->position.y), pos, distance);
+      238 
+      239 -          float const distance = std::sqrtf(posX * posX + posY
+          - * posY);                                                     
+      240 -          float const scale = 1.0f / distance;                
+      241 -          Vec2D pos;                                          
+      242 -          pos.x = -posX * scale;                              
+      243 -          pos.y = posY * scale;                               
+      244 -                                                              
+      239            if (m_pMixer->MixFile1InNPositional(m_pOutputBuffer,
+            pPlayingVoice->pFile, pPlayingVoice->numChannels, pos, distan
+           ce) != m_bufferLength)
+      240            {
+      241              m_pPlayingVoices.erase(m_pPlayingVoices.begin() +
+           i);
+
+● Update(AudioManager.cpp)
+  ⎿  Added 6 lines, removed 2 lines
+      260 
+      261    if (state != ELoopState::Free)
+      262    {
+      263 -    if ((state == ELoopState::Playing) && (m_loopVoice.lastSee
+          -nState == ELoopState::Free))                                  
+      263 +    bool const isRestart = (state == ELoopState::Playing) && (
+          +m_loopVoice.lastSeenState == ELoopState::Free);               
+      264 +                                                              
+      265 +    if (isRestart)                                            
+      266      {
+      267        m_loopVoice.readPos = 0.0;
+      268        m_loopVoice.gain = 0.0f;
+      269      }
+      270 
+      271      float const targetGain = (state == ELoopState::Stopping) ?
+            0.0f : m_loopVoice.targetGain.load();
+      272 +    Vec2D const position(m_loopVoice.position.x.load(), m_loop
+          +Voice.position.y.load());                                     
+      273 
+      271 -    // ... mix the buffer, ramping m_loopVoice.gain towards ta
+          -rgetGain per sample ...                                       
+      274 +    m_pOutputBuffer->pData = pOutputBuffer;                   
+      275 +    m_pMixer->MixLoop(m_pOutputBuffer, m_loopVoice, targetGain
+          +, m_loopVoice.targetRate.load(), position, isRestart);        
+      276 
+      277      if ((state == ELoopState::Stopping) && (m_loopVoice.gain <
+           = 0.0001f))
+      278      {
+
+  Searched for 1 pattern, ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● I added a shared positioning helper, used it in MixFile1InNPositional, and
+  implemented the loop mixer with it. The Debug|x64 build compiles and links
+  without warnings. I haven't run the game, so I haven't heard the result yet.
+
+  The build still reports a failure, from the post-build step:
+  CopyRuntimeLibs.bat wasn't found when MSBuild ran from the command line. That
+  step only copies the DLLs and has nothing to do with these changes.
+  Arkanoid.exe itself was produced.
+
+  The helper is in CAudioMixer (AudioMixer.h/.cpp), as two static,
+  real-time-safe functions:
+  - ComputeListenerDirection(relativePosition, outDirection, outDistance)
+    converts a position relative to the paddle into a direction and a distance
+    factor. This math was copied out of RenderAudio.
+  - ComputeSpeakerGains(direction, distanceFactor, numBufferChannels) returns an
+    SSpeakerGains with one gain per speaker (stereo, quad or 6-channel),
+    including distance attenuation. This is the panning math moved out of
+    MixFile1InNPositional, unchanged.
+
+  Where it's used:
+  - MixFile1InNPositional now gets its gains from the helper and runs one loop
+    over the channels. Sound output is the same as before.
+  - RenderAudio calls ComputeListenerDirection for positioned voices instead of
+    doing the math inline.
+  - Loop mixing: your header already declared CAudioMixer::MixLoop and an
+    unimplemented ComputeStereoPan, so I implemented MixLoop rather than adding
+    a separate MixLoopVoice, and removed ComputeStereoPan. MixLoop uses both
+    helpers, so the ball loop now pans on quad/5.1 too, not just stereo.
+    RenderAudio calls it where the placeholder comment was, and passes isRestart
+    so a fresh start jumps straight to the right pan and rate.
+  - Loop voice data: in SLoopVoice, panLeft/panRight became channelGains[6], so
+    each speaker's gain is smoothed separately. A static_assert keeps that size
+    in line with g_maxPositionalChannels.
+  - Fade length: the loop's fade in/out now uses your g_loopFadeSeconds. The
+    fade is linear, so a stopping loop reaches exactly 0 and is set back to
+    Free.
+
+  Three small behaviour fixes inside the helper:
+  - A source sitting right on the listener used to cause a divide by zero. It
+    now counts as straight ahead with no attenuation. For the loop this matters:
+    a NaN would get stuck in the smoothed gains and silence it for the rest of
+    the session.
+  - The cosine is clamped before acosf, so rounding can't produce a NaN on
+    surround setups.
+  - The surround default: case no longer zeroes six variables that were already
+    zero.
+
+  Still open:
+  - StartLoop still writes lastSeenState, which only the audio thread should
+    touch. Because of that, isRestart never becomes true, so a new ball won't
+    rewind the loop to the start.
+  - SetLoopPosition is still empty, and Game.cpp:481 passes it the absolute x
+    rather than the x relative to the paddle. Panning works anyway, because
+    StartLoop is called every frame with the paddle-relative position.
+  - g_baseTimeFactor isn't used yet: SetLoopRate stores m_timeFactor directly
+    (clamped), so the loop plays at 1.3× at the start of a game.
+
+  Nothing is committed yet. Say if you want me to fix any of the open items.
+
+✻ Cogitated for 2m 53s · done 9:58
+
+❯ Fix the bug in StartLoop                                                      
+● Update(AudioManager.cpp)
+  ⎿  Added 11 lines, removed 12 lines
+      310 
+      311  bool CAudioManager::StartLoop(Vec2D const& position, float con
+           st gain,  float const rate)
+      312  {
+      313 -  //m_loopVoice.positioned = positioned;                      
+      314 -  m_loopVoice.state.store(ELoopState::Playing);               
+      315 -  m_loopVoice.lastSeenState = ELoopState::Playing;            
+      316 -                                                              
+      313 +  // Game thread: only touches the atomics. lastSeenState, rea
+          +dPos and gain belong to the audio thread,                     
+      314 +  // which sees the Free -> Playing change itself and restarts
+          + the loop from the beginning.                                 
+      315    if (!m_loopVoice.isValid || (m_loopVoice.pSamples == nullptr
+           ))
+      318 -    {                                                         
+      319 -            return false; // Sample failed to load: no loop, b
+          -ut gameplay continues.                                        
+      320 -    }                                                         
+      316 +  {                                                           
+      317 +    return false; // Sample failed to load: no loop, but gamep
+          +lay continues.                                                
+      318 +  }                                                           
+      319 
+      322 -    m_loopVoice.position.x.store(position.x);                 
+      323 -    m_loopVoice.position.y.store(position.y);                 
+      324 -    m_loopVoice.targetGain.store(gain);                       
+      325 -    m_loopVoice.targetRate.store(rate);                       
+      320 +  // Parameters first, state last, so the audio thread never s
+          +tarts the voice with stale parameters.                        
+      321 +  m_loopVoice.position.x.store(position.x);                   
+      322 +  m_loopVoice.position.y.store(position.y);                   
+      323 +  m_loopVoice.targetGain.store(gain);                         
+      324 +  m_loopVoice.targetRate.store(std::clamp(rate, Game::g_loopRa
+          +teMin, Game::g_loopRateMax));                                 
+      325    m_loopVoice.state.store(ELoopState::Playing);
+      327 -                                                              
+      326 +                                                              
+      327    return true;
+      328  }
+      329 
+
+  Read 1 file, ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● The code compiles; the only build error is the same CopyRuntimeLibs.bat
+  post-build step as before. The CLAUDE.md note I added earlier now describes
+  this bug as still open, so I'll update it.
+
+● Update(D:\Github\ArknoidTest\CLAUDE.md)
+  ⎿  Added 2 lines, removed 1 line
+      43  - `SPlayingVoice` has no volume, pitch or loop state, and there
+           is no API to stop a voice. A voice ends only when its file run
+          s out.
+      44  - **Feature in progress (ball-travel loop):** `SLoopVoice` (`Lo
+          opVoice.h`) is a separate, real-time-safe voice type. `CAudioMa
+          nager` owns it as a member (`m_loopVoice`, not a heap object),
+          its samples are preloaded at startup by `LoadLoopSample`, and t
+          he game thread drives it through atomics (`state`, `targetGain`
+          , `targetRate`). The audio thread keeps its own copies (`lastSe
+          enState`, `readPos`, `gain`, `rate`). `NOTES.md` records the de
+          sign and the rejected "loop flag on `SPlayingVoice`" alternativ
+          e.
+      45    - The voice is header-only: `LoopVoice.cpp` was removed. The
+          game drives it from `CGame::UpdateProjectiles` (`StartLoop` / `
+          SetLoopRate(m_timeFactor)` / `StopLoop`).
+      46 -  - Still unfinished: the per-sample mix in `RenderAudio` is a 
+         -placeholder comment, and `SetLoopGain` / `SetLoopPosition` are 
+         -empty stubs. `StartLoop` writes the audio-thread-only `lastSeen
+         -State` from the game thread, which defeats the Free→Playing res
+         -tart check (reset `readPos`/`gain`). Keep each audio-thread-onl
+         -y field owned by one thread.                                   
+      46 +  - Mixing is `CAudioMixer::MixLoop`; panning for every positio
+         +ned voice goes through `CAudioMixer::ComputeListenerDirection` 
+         ++ `ComputeSpeakerGains`. The audio thread detects Free→Playing 
+         +itself (`lastSeenState`) to restart the loop, so never write au
+         +dio-thread-only fields from the game thread.                   
+      47 +  - Still unfinished: `SetLoopGain` / `SetLoopPosition` are emp
+         +ty stubs.                                                      
+      48    - `LoopVoice.h` is listed twice in the `.vcxproj` `ClInclude`
+           group.
+      49 
+      50  **Constants and assets.** Everything is a `constexpr` in `Globa
+          l.h`: map and border sizes (`Arkanoid::Game::g_border*`), speed
+          s, `g_musicVolume`, and every `asset_*` path. Add new sound pat
+          hs there.
+
+● I fixed StartLoop (AudioManager.cpp:313). It no longer sets lastSeenState,
+  which only the audio thread should touch. The audio thread can now notice a
+  fresh start on its own and rewind the loop to the beginning with the volume
+  fading in from 0.
+
+  It compiles, but I haven't run the game to hear it.
+
+  Two smaller fixes in the same function:
+  - Order: it checks that the sample loaded before setting the state to Playing.
+    Before, a failed load left the voice marked Playing with nothing to play.
+  - Same clamp as SetLoopRate: the rate passed to StartLoop is now clamped to
+    g_loopRateMin/g_loopRateMax.
+
+  I also updated the loop-voice notes in CLAUDE.md, since they described this
+  bug as still open.
+
+  There's a related issue in Game.cpp:479–480. Every frame, StartLoop sets the
+  rate to its default of 1.0, and SetLoopRate(m_timeFactor) sets it back
+  straight after. If the audio thread reads in between, the rate jumps back
+  towards 1.0 for a moment. That's most noticeable in bullet time. The fix is
+  one line: pass m_timeFactor as StartLoop's third argument and drop the
+  separate SetLoopRate call. Should I make that change?
+
+  Nothing is committed yet.
+
+✻ Baked for 28s · done 10:05
+
+❯ yes, pass timeFactor to startloop                                             
+
+● Update(Game.cpp)
+  ⎿  Added 1 line, removed 2 lines
+      476          SDL_Rect const& projectilePosition = pProjectile->GetR
+           enderPosition();
+      477          //ball travel loop
+      478          //TODO: for better readability index as or some kind o
+           f identifier as param
+      479 -        m_pAudioManager->StartLoop({ static_cast<float>(projec
+          -tilePosition.x - (playerPosition.x + 30.0f)), static_cast<floa
+          -t>(projectilePosition.y) });                                  
+      480 -        m_pAudioManager->SetLoopRate(m_timeFactor);           
+      479 +        m_pAudioManager->StartLoop({ static_cast<float>(projec
+          +tilePosition.x - (playerPosition.x + 30.0f)), static_cast<floa
+          +t>(projectilePosition.y) }, 1.0f, m_timeFactor);              
+      480          m_pAudioManager->SetLoopPosition({static_cast<float>(p
+           rojectilePosition.x), static_cast<float>(projectilePosition.y)
+           });
+      481          // collision with borders take precedence
+      482          if ((projectilePosition.y + projectilePosition.h) >= g
+           _borderBottom)
+
+  Searched for 1 pattern, ran 1 shell command · 1 failed (ctrl+o to expand)
+
+● StartLoop now receives the time factor directly, so the loop's rate no longer
+  jumps back to 1.0 between two calls. In Game.cpp:479 the call is now
+  StartLoop(relativePos, 1.0f, m_timeFactor), and I removed the separate
+  SetLoopRate call. The 1.0f is the gain, which was already the default.
+
+  The project compiles and links with no compiler or linker errors or warnings.
+  The build still reports failure from the post-build step that copies the DLLs
+  (CopyRuntimeLibs.bat isn't found when building from the command line). I
+  haven't run the game to hear the change.
+
+  SetLoopRate is no longer called anywhere.
+
+  Nothing is committed yet.
+
+✻ Brewed for 16s · done 10:08
+
+❯ why are the playingVoices being erased after reading them in renderaudio?     
+
+  Read 1 file (ctrl+o to expand)
+
+● Erasing a voice is how a one-shot sound ends. SPlayingVoice has no loop flag,
+  no stop call and no "finished" state, so the voice list is the only record of
+  what is playing. When a sound has finished, removing it from m_pPlayingVoices
+  is the only way to stop mixing it.
+
+  How a voice ends
+
+  At AudioManager.cpp:227–261, RenderAudio loops over m_pPlayingVoices. For each
+  voice:
+
+  1. MixFile1InNPositional or MixFileNInN reads up to one buffer of frames
+     (m_bufferLength, 2048) from the voice's open SNDFILE* with sf_readf_float,
+     mixes them in, and returns how many frames it read.
+  2. If it read fewer than 2048 frames, the file has reached its end. This was
+     the last partial buffer, which has already been mixed, so the voice is
+     erased.
+  3. Invalid or null voices (the else branch around line 258) are also erased.
+
+  The loop runs from the back of the vector to the front (for (int i = size - 1;
+  i >= 0; --i)). Erasing element i shifts only the elements after it, which
+  have already been processed, so no voice is skipped.
+
+  Erasing does more than remove an entry. Each shared_ptr<SPlayingVoice> there
+  is the last owner of its voice, so erasing destroys the voice, and
+  ~SPlayingVoice calls sf_close(pFile) (PlayingVoice.h:30). Erasing is therefore
+  also what closes the file handle.
+
+  Why this design is a problem
+
+  It works, but it breaks all three real-time rules in the brief, and CLAUDE.md
+  marks it as a pattern not to copy:
+
+  - Unsynchronized shared vector. Play on the game thread calls push_back on the
+    same vector while the audio thread erases from it, with no lock. A
+    push_back that reallocates during the audio thread's loop invalidates the
+    element it is reading. That is undefined behaviour and a possible crash.
+  - Freeing memory on the audio thread. The erase releases the last shared_ptr,
+    so the audio thread frees the SPlayingVoice and the shared_ptr's bookkeeping
+    memory.
+  - File I/O on the audio thread. sf_close runs inside the callback, on top of
+    the sf_readf_float reads that already happen there every buffer.
+  - Mono outputs. If the output device has only one channel,
+    MixFile1InNPositional returns 0, so a positioned voice is erased on its
+    first buffer without ever being heard.
+  - The pointer returned by Play. Play returns a raw SPlayingVoice* that
+    UpdatePosition later compares against the list. After an erase, that pointer
+    refers to freed memory. UpdatePosition only compares addresses, so it
+    doesn't crash. But a new voice allocated at the same address would make it
+    update the wrong voice.
+
+  How the loop voice avoids this
+
+  The ball loop doesn't follow this pattern. SLoopVoice is a member of
+  CAudioManager, so it is never allocated or freed during play, and its samples
+  are loaded into memory at startup. It doesn't end by being erased: the game
+  thread sets the Stopping state, and the audio thread fades it out and sets it
+  back to Free. The usual fix for one-shot voices works the same way: a fixed
+  pool of voice slots with a state field, and a lock-free queue that hands
+  finished voices back to the game thread to close and free.
+
+✻ Worked for 16s · done 10:47
+
+❯ In MixFileNInN how is the loop realized?                                      
+
+● The loop is the if (loop) block at AudioMixer.cpp:28–35. It repeats a file by
+  seeking back to the start whenever a read runs out. Only the music uses it:
+  all three MixFileNInN calls in RenderAudio pass loop = true. The ball loop has
+  its own code in MixLoop and doesn't go through this.
+
+  numFramesRead = sf_readf_float(pFile, pMixBuffer, requestedSamples);
+
+  if (loop)
+  {
+          while (numFramesRead != requestedSamples)
+          {
+                  sf_seek(pFile, 0, SF_SEEK_SET);
+                  numFramesRead += sf_readf_float(pFile, (pMixBuffer +
+  numFramesRead), (requestedSamples - numFramesRead));
+          }
+  }
+
+  Step by step
+
+  1. Normal read: it reads up to one buffer (2048 frames) into the scratch
+     buffer m_pMixBuffer.
+  2. End of file: if the file ends partway through, sf_readf_float returns fewer
+     frames than requested.
+  3. Wrap: it seeks back to frame 0 and reads the missing frames into the rest
+     of the scratch buffer, after the frames it already has.
+  4. Repeat: the while keeps doing this until the buffer is full, so a file
+     shorter than one buffer would loop several times within a single buffer.
+  5. Mixing: the mixing loops below always receive a full buffer. So the
+     function returns 2048, and RenderAudio never sees the music end.
+
+  There's no state for the loop. The file's own read position, held inside the
+  open SNDFILE*, is the playback position, and seeking is the only way to wrap.
+  That means the loop involves file I/O inside the audio callback every time it
+  wraps.
+
+  Bug: the second read lands in the wrong place
+
+  pMixBuffer + numFramesRead offsets the pointer by frames, but the buffer holds
+  interleaved samples, one float per channel per frame. The music files are
+  stereo, so the offset should be numFramesRead * numFileChannels.
+
+  Example: 500 frames remain before the end of the file.
+
+  - The first read fills floats 0–999.
+  - The wrap read starts at float 500, which is only frame 250. It overwrites
+    the last 250 frames of the file's ending with the file's beginning.
+  - It writes 1548 frames, which ends at frame 1798. The last 250 frames of the
+    buffer keep the zeros from the std::fill at the top of the function.
+
+  So at every music loop point the end of the track is cut short, and about 250
+  frames (around 5 ms at 48 kHz) of silence follow. You may hear that as a click
+  or a short dropout at the seam.
+
+  The fix is one line:
+
+  numFramesRead += sf_readf_float(pFile, pMixBuffer + (numFramesRead *
+  numFileChannels), requestedSamples - numFramesRead);
+
+  Smaller issues in the same function
+
+  - Possible hang: if a read returns 0 (empty or unreadable file), the while
+    loop never ends and the audio callback hangs. A framesRead == 0 guard would
+    break out of it.
+  - Wrong stride: the mixing loops index the scratch buffer with channelsToWrite
+    instead of numFileChannels. When the output has fewer channels than the
+    file, they read the interleaved data with the wrong step.
+  - Buffer overrun on a mono device: the scratch buffer is sized for the
+    output's channel count (bufferLength * numChannels), but sf_readf_float
+    writes frames * numFileChannels floats. A stereo file on a mono device
+    therefore writes past the end of the buffer on every read, loop or not.
+
+  I haven't changed anything. Do you want me to apply the offset fix, and the
+  framesRead == 0 guard with it?
+
+✻ Cogitated for 23s · done 11:11
+
+❯ why is it problematic to read from the disk in the audiothread                
+
+● The audio thread has a hard deadline, and a disk read can take an
+  unpredictable amount of time. Nothing guarantees how long a read will take, so
+  even an occasional slow one costs you audio.
+
+  The deadline
+
+  PortAudio calls StreamCallback once per buffer and expects it to return before
+  the sound card runs out of samples. This project uses 2048-frame buffers, so
+  at 48 kHz the callback has about 42.7 ms (2048 / 48 000). In practice it has
+  less, because the driver and the OS need part of that time too. If the
+  callback is late, the device has no data. That's a buffer underrun, which you
+  hear as a click, a stutter or a gap. Every sound drops out together, music
+  included, not just the voice that was slow.
+
+  What matters is the worst case, not the average. A callback that takes 1 ms a
+  thousand times and 60 ms once still glitches once.
+
+  Why disk reads have no upper bound
+
+  sf_readf_float ends up as ReadFile on Windows. Usually the data is already in
+  the OS file cache and the read is fast, but a single read can also hit any of
+  these:
+
+  - Cache misses: the data has to come from the drive. On a hard disk that's a
+    seek, about 5–15 ms each, and one read can need several. SSDs are faster,
+    but they still have occasional slow spikes.
+  - A drive that has to wake up: power saving can spin a disk down or put an SSD
+    into a low-power state. Waking it can take hundreds of milliseconds or even
+    seconds.
+  - Other software: antivirus scanners intercept file access, indexers and
+    backup tools compete for the disk, and assets on a network drive add network
+    delays.
+  - Locks you don't control: the file system and the C runtime take internal
+    locks. If a lower-priority thread holds one of them, the high-priority audio
+    thread waits until that thread gets scheduled again. This is called
+    priority inversion.
+  - Being descheduled: a system call that blocks gives up the CPU. When the
+    thread runs again is up to the scheduler.
+
+  None of these show up in a profiler on your machine. They show up as
+  occasional glitches on someone else's.
+
+  Where this code does it
+
+  - Every voice reads every buffer: MixFileNInN and MixFile1InNPositional call
+    sf_readf_float for the music and for each playing voice in every callback.
+  - Music loop: when the music loops, sf_seek runs in the callback.
+  - Closing files: erasing a finished voice runs ~SPlayingVoice → sf_close in
+    the callback, which is a file system call plus freeing memory.
+
+  It sounds fine in practice because the files are small, the OS keeps them
+  cached after the first play, and 43 ms is a generous buffer. That's luck, not
+  a guarantee. If you shrank the buffer to a usual game size (256–512 frames,
+  about 5–10 ms), the margin would mostly be gone.
+
+  What to do instead
+
+  - Preload short sounds: decode them into memory at startup, and the audio
+    thread only copies floats. The ball loop works this way (LoadLoopSample,
+    then MixLoop reads pSamples).
+  - Stream long sounds from a worker thread: a background thread reads the file
+    ahead into a lock-free ring buffer, and the audio thread only reads from
+    that buffer. Disk delays then hit the worker, and the buffered audio covers
+    them. This is the usual fix for the music.
+  - Clean up off the audio thread: opening, closing and freeing happen on the
+    game thread or a worker. The audio thread hands finished voices back through
+    a lock-free queue.
+
+  The same reasoning is behind the brief's other two rules. Locks and heap
+  allocation also have no upper bound on how long they can take (waiting on
+  another thread, or on the allocator's internal lock), so they don't belong in
+  the audio thread either.
+
+✻ Baked for 17s · done 11:29
