@@ -172,7 +172,6 @@
     <ClCompile Include="AudioManager.cpp" />
     <ClCompile Include="BiquadFilter.cpp" />
     <ClCompile Include="Game.cpp" />
-    <ClCompile Include="LoopVoice.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Player.cpp" />
     <ClCompile Include="Projectile.cpp" />

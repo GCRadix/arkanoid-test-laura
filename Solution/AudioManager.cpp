@@ -64,7 +64,9 @@ CAudioManager::CAudioManager()
 		44100,
 		false,
 		Vec2D(0.0f, 0.0f));
-
+	
+	bool loopSampleLoaded = LoadLoopSample(asset_audio_ballTravel01);
+	
 	Pa_OpenDefaultStream(
 		&m_pStream,
 		0,
@@ -258,6 +260,29 @@ void CAudioManager::RenderAudio(void* pOutputBuffer)
 			}
 		}
 	}
+
+	ELoopState const state = m_loopVoice.state.load();
+
+	if (state != ELoopState::Free)
+	{
+		if ((state == ELoopState::Playing) && (m_loopVoice.lastSeenState == ELoopState::Free))
+		{
+			m_loopVoice.readPos = 0.0;
+			m_loopVoice.gain = 0.0f;
+		}
+
+		float const targetGain = (state == ELoopState::Stopping) ? 0.0f : m_loopVoice.targetGain.load();
+
+		// ... mix the buffer, ramping m_loopVoice.gain towards targetGain per sample ...
+
+		if ((state == ELoopState::Stopping) && (m_loopVoice.gain <= 0.0001f))
+		{
+			ELoopState expected = ELoopState::Stopping;
+			m_loopVoice.state.compare_exchange_strong(expected, ELoopState::Free);
+		}
+	}
+
+	m_loopVoice.lastSeenState = m_loopVoice.state.load();
 }
 
 //////////////////////////////////////////////////////////////////////////////////
@@ -282,5 +307,85 @@ bool CAudioManager::UpdatePosition(SPlayingVoice* pPlayingVoice_, Vec2D const& p
 void CAudioManager::SetMusic(EMusic const music)
 {
 	m_playing = music;
+}
+
+bool CAudioManager::StartLoop(Vec2D const& position, float const gain,  float const rate)
+{
+	//m_loopVoice.positioned = positioned;
+	m_loopVoice.state.store(ELoopState::Playing);
+	m_loopVoice.lastSeenState = ELoopState::Playing;
+	
+	if (!m_loopVoice.isValid || (m_loopVoice.pSamples == nullptr))
+    {
+            return false; // Sample failed to load: no loop, but gameplay continues.
+    }
+
+    m_loopVoice.position.x.store(position.x);
+    m_loopVoice.position.y.store(position.y);
+    m_loopVoice.targetGain.store(gain);
+    m_loopVoice.targetRate.store(rate);
+	m_loopVoice.state.store(ELoopState::Playing);
+	
+	return true;
+}
+
+void CAudioManager::StopLoop()
+{
+	ELoopState expected = ELoopState::Playing;
+	m_loopVoice.state.compare_exchange_strong(expected, ELoopState::Stopping);
+}
+
+bool CAudioManager::LoadLoopSample(char const* filePath)
+{
+	SF_INFO sfInfo{ 0 };
+	SNDFILE* const pFile = sf_open(filePath, SFM_READ, &sfInfo);
+	
+	if (pFile == nullptr)
+	{
+		return false;
+	}
+
+	sf_count_t const numFrames = sfInfo.frames;
+	int const numFileChannels = sfInfo.channels;
+
+	if ((numFrames <= 0) || (numFileChannels <= 0))
+	{
+		sf_close(pFile);
+		return false;
+	}
+	
+	// Read the whole file interleaved, then downmix to mono so the loop can be panned like the other positioned voices.
+	std::vector<float> interleaved(static_cast<size_t>(numFrames * numFileChannels));
+	sf_count_t const framesRead = sf_readf_float(pFile, interleaved.data(), numFrames);
+	sf_close(pFile);
+
+	if (framesRead <= 0)
+	{
+		return false;
+	}
+
+	m_loopSampleData.assign(static_cast<size_t>(framesRead), 0.0f);
+	float const channelScale = 1.0f / static_cast<float>(numFileChannels);
+
+	for (sf_count_t frame = 0; frame < framesRead; ++frame)
+	{
+		float sum = 0.0f;
+
+		for (int channel = 0; channel < numFileChannels; ++channel)
+		{
+			sum += interleaved[static_cast<size_t>(frame * numFileChannels + channel)];
+		}
+
+		m_loopSampleData[static_cast<size_t>(frame)] = sum * channelScale;
+	}
+
+	m_loopVoice.pSamples   = m_loopSampleData.data();
+	m_loopVoice.numFrames  = framesRead;
+	m_loopVoice.sampleRate = sfInfo.samplerate;
+	m_loopVoice.positioned = true;
+	m_loopVoice.isValid    = true;
+	m_loopVoice.state.store(ELoopState::Free);
+
+	return true;
 }
 } //Arkanoid::Audio
